@@ -40,6 +40,11 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
     """
     probe_origin = "https://cors-probe.example"
     request_headers = dict(headers) if headers else {}
+    # If the caller supplies their own Origin header, setdefault keeps
+    # theirs, but the reflection test below still compares the response
+    # against probe_origin. A server echoing the caller's origin back
+    # is then missed, because the comparison expects a value that was
+    # never sent.
     request_headers.setdefault("Origin", probe_origin)
     try:
         # Input validation: Check if the URL is valid
@@ -71,6 +76,11 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
 
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
+        # Because of that raise, an error response never reaches the
+        # header analysis below, even though APIs commonly send their
+        # CORS headers on 401 and 403 responses too. Those servers get
+        # a "check could not be performed" instead of a verdict on the
+        # headers they did send.
         # Analyze CORS headers
         origin = response.headers.get("Access-Control-Allow-Origin")
         credentials = response.headers.get("Access-Control-Allow-Credentials")
@@ -122,6 +132,11 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
         # If the Origin header is set to a specific value, ensure that
         # the response includes the "Vary: Origin" header.  This is important
         # for caching.
+        # Read the verdict these two branches produce: a server that
+        # allows one fixed origin, not the probe's, and sets no Vary
+        # header is reported as a potential misconfiguration and exits
+        # as a finding. A caching nicety is doing the work of a
+        # security verdict here.
         if origin != "*" and origin and "Vary" in response.headers and "Origin" not in response.headers["Vary"]:
             logging.warning("Potential CORS misconfiguration:  Origin is set, but Vary: Origin is not.  Caching could be problematic")
             return True
