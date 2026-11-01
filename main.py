@@ -2,6 +2,7 @@ import argparse
 import requests
 import logging
 import re
+import sys
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
@@ -33,8 +34,13 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
         data (str, optional): Data to send with the request. Defaults to None.
 
     Returns:
-        bool: True if a potential CORS misconfiguration is found, False otherwise.
+        bool: True if a potential CORS misconfiguration is found, False if a
+        response was received and no misconfiguration was found, or None if
+        the check could not be performed.
     """
+    probe_origin = "https://cors-probe.example"
+    request_headers = dict(headers) if headers else {}
+    request_headers.setdefault("Origin", probe_origin)
     try:
         # Input validation: Check if the URL is valid
         try:
@@ -50,15 +56,15 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
             logging.debug(f"Using custom headers: {headers}")
 
         if method == "GET":
-          response = requests.get(url, headers=headers, allow_redirects=True)
+          response = requests.get(url, headers=request_headers, timeout=10, allow_redirects=True)
         elif method == "POST":
-            response = requests.post(url, headers=headers, data=data, allow_redirects=True)
+            response = requests.post(url, headers=request_headers, data=data, timeout=10, allow_redirects=True)
         elif method == "PUT":
-            response = requests.put(url, headers=headers, data=data, allow_redirects=True)
+            response = requests.put(url, headers=request_headers, data=data, timeout=10, allow_redirects=True)
         elif method == "DELETE":
-            response = requests.delete(url, headers=headers, allow_redirects=True)
+            response = requests.delete(url, headers=request_headers, timeout=10, allow_redirects=True)
         elif method == "OPTIONS":
-            response = requests.options(url, headers=headers, allow_redirects=True)  # Crucial for CORS!
+            response = requests.options(url, headers=request_headers, timeout=10, allow_redirects=True)
         else:
             raise ValueError(f"Unsupported HTTP method: {method}")
 
@@ -92,14 +98,25 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
             logging.info("Access-Control-Allow-Headers header not found.")
 
 
-        # Check for wildcard origin or missing origin validation
-        if origin == "*" or origin is None:
-            logging.warning("Potential CORS misconfiguration: Wildcard origin (*) or missing Access-Control-Allow-Origin allows requests from any domain.")
-            return True
+        # A missing Access-Control-Allow-Origin header is the safe,
+        # blocking state: browsers do not allow cross origin reads.
+        if origin is None:
+            logging.info("No Access-Control-Allow-Origin header: cross origin reads are blocked, no misconfiguration on that ground.")
+            return False
 
-        # Check if credentials are allowed with a wildcard origin (very dangerous!)
+        # The critical combination is checked first: wildcard origin
+        # together with credentials.
         if origin == "*" and credentials == "true":
             logging.critical("CRITICAL CORS MISCONFIGURATION: Wildcard origin (*) and Access-Control-Allow-Credentials: true. This is extremely dangerous!")
+            return True
+
+        # Reflection: the server echoed back the exact Origin sent.
+        if origin == probe_origin:
+            logging.warning("Potential CORS misconfiguration: The server reflects the Origin header back in Access-Control-Allow-Origin.")
+            return True
+
+        if origin == "*":
+            logging.warning("Potential CORS misconfiguration: Wildcard origin (*) allows requests from any domain.")
             return True
 
         # If the Origin header is set to a specific value, ensure that
@@ -117,13 +134,13 @@ def check_cors_policy(url, headers=None, method="GET", data=None):
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Request failed: {e}")
-        return False
+        return None
     except ValueError as e:
         logging.error(f"Invalid input: {e}")
-        return False
+        return None
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
-        return False
+        return None
 
 
 def main():
@@ -147,13 +164,14 @@ def main():
             return
 
     # Perform CORS check
-    try:
-        if check_cors_policy(args.url, headers, args.method, args.data):
-            print("Potential CORS misconfiguration detected.")
-        else:
-            print("No immediate CORS misconfiguration detected.")
-    except Exception as e:
-        logging.error(f"An error occurred during CORS check: {e}")
+    result = check_cors_policy(args.url, headers, args.method, args.data)
+    if result is None:
+        print("CORS check failed: no response was received, so no verdict could be made.")
+        sys.exit(1)
+    if result:
+        print("Potential CORS misconfiguration detected.")
+    else:
+        print("No immediate CORS misconfiguration detected.")
 
 
 if __name__ == "__main__":
